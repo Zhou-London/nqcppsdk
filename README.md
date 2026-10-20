@@ -1,3 +1,13 @@
+<img src="https://capsule-render.vercel.app/api?type=waving&height=400&text=NQCPPSDK&fontAlign=80&fontAlignY=40&color=gradient&desc=v0.1.1&descAlign=80&descAlignY=55" />
+
+<p align="center">
+  <img alt="Version 0.1.1" src="https://img.shields.io/badge/version-0.1.1-blue" />
+  <img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" />
+  <img alt="CMake 3.28+" src="https://img.shields.io/badge/CMake-3.28%2B-064F8C?logo=cmake&logoColor=white" />
+  <img alt="Header-only" src="https://img.shields.io/badge/header--only-INTERFACE-4c1" />
+  <img alt="C ABI" src="https://img.shields.io/badge/plugin-C%20ABI-orange" />
+</p>
+
 # NQCPPSDK
 
 NQCPPSDK is the SDK for writing NQBook plugins. There are two kinds:
