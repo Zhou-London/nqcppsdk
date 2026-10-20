@@ -1,7 +1,7 @@
-<p align="center"><img src="https://capsule-render.vercel.app/api?type=blur&height=240&color=gradient&text=NQCPPSDK&fontSize=64&fontAlign=50&fontAlignY=45&desc=v0.1.1&descSize=22&descAlign=50&descAlignY=65" /></p>
+<p align="center"><img src="https://capsule-render.vercel.app/api?type=blur&height=240&color=gradient&text=NQCPPSDK&fontSize=64&fontAlign=50&fontAlignY=45&desc=v0.1.2&descSize=22&descAlign=50&descAlignY=65" /></p>
 
 <p align="center">
-  <img alt="Version 0.1.1" src="https://img.shields.io/badge/version-0.1.1-blue" />
+  <img alt="Version 0.1.2" src="https://img.shields.io/badge/version-0.1.2-blue" />
   <img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" />
   <img alt="CMake 3.28+" src="https://img.shields.io/badge/CMake-3.28%2B-064F8C?logo=cmake&logoColor=white" />
   <img alt="Header-only" src="https://img.shields.io/badge/header--only-INTERFACE-4c1" />
@@ -13,7 +13,7 @@
 NQCPPSDK is the SDK for writing NQBook plugins. There are two kinds:
 
 - **Feature**: computes numbers from an order book. The engine calls it once per event and reads it once per sample.
-- **Adapter**: produces the `mbo` event stream. The engine calls its `Next` method repeatedly on a thread the engine owns.
+- **Adapter**: produces the MBO event stream. The engine calls its `Next` method repeatedly on a thread the engine owns.
 
 The SDK is header-only, has no dependencies, and lives in namespace `nq`. A plugin includes only headers under `nq/` and never sees engine code. The engine calls the plugin through a C ABI. The content hash of each ABI header is compiled into the plugin. The engine refuses a plugin whose hash differs from its own.
 
@@ -35,7 +35,7 @@ NQBook fetches the SDK from GitHub at a pinned tag. A plugin repository does the
 include(FetchContent)
 FetchContent_Declare(nqcppsdk
     GIT_REPOSITORY https://github.com/Zhou-London/nqcppsdk.git
-    GIT_TAG v0.1.0
+    GIT_TAG v0.1.2
     GIT_SHALLOW ON
 )
 FetchContent_MakeAvailable(nqcppsdk)
@@ -170,37 +170,44 @@ auto v = sb.Read();   // v[0] == 0.75, v[1] == 1
 
 ## Writing an adapter
 
+This adapter produces `count` add events for one instrument:
+
 ```cpp
+#include <cstdint>
+
 #include <nq/adapter.hpp>
 
-class Replay : public nq::AdapterBase {
+class Ticks : public nq::AdapterBase {
 public:
-    static constexpr const char* kName = "replay";
+    static constexpr const char* kName = "ticks";
     static constexpr nq::Provides kProvides = nq::Provides::MBO;
 
-    explicit Replay(const nq::Params& p) : reader_(std::string(p.Require("path"))) {
-        for (const auto& r : reader_.Instruments())
-            table_.push_back(nq::Instrument{r.id, r.symbol, r.tick_size, r.lot_size});
-    }
+    explicit Ticks(const nq::Params& p) : count_(p.RequireInt("count")) {}
 
     nq::Next Next(nq::Mbo& out) {
-        nq_mbo raw;
-        const int rc = reader_.Next(raw);
-        if (rc == 1) { out = nq::Mbo(raw); return nq::Next::Event; }
-        return rc == 0 ? nq::Next::End : nq::Next::Error;
+        if (next_ >= count_) return nq::Next::End;
+        const std::int64_t i = next_++;
+        out.ts = i + 1;
+        out.id = static_cast<std::uint64_t>(i + 1);
+        out.instrument = 1;
+        out.side = i % 2 ? nq::Side::Ask : nq::Side::Bid;
+        out.action = nq::Action::Add;
+        out.price = 1000 + i;
+        out.qty = 1;
+        return nq::Next::Event;
     }
 
     const nq::Instrument* FindInstrument(std::uint32_t id) const noexcept {
-        for (const auto& i : table_) if (i.id == id) return &i;
-        return nullptr;
+        return id == 1 ? &instrument_ : nullptr;
     }
 
 private:
-    nq::mbo_file::Reader reader_;
-    std::vector<nq::Instrument> table_;
+    std::int64_t count_;
+    std::int64_t next_ = 0;
+    nq::Instrument instrument_{1, "DEMO", 10, 1};
 };
 
-NQ_ADAPTER(Replay)
+NQ_ADAPTER(Ticks)
 ```
 
 | Member | Role |
@@ -222,7 +229,9 @@ Return values of `Next`:
 
 An adapter is synchronous. The engine runs it on a thread the engine owns. The engine calls `Next` and `FindInstrument` on that thread only, never at the same time. `Next` must return within a bounded time. Return `Again` when no data is available, so the engine can act on a stop request.
 
-### The mbo stream contract
+`nq::Mbo` has the fields `ts`, `id`, `price`, `qty`, `instrument`, `side`, and `action`. `nq::Instrument` has `id`, `symbol`, `tick_size`, and `lot_size`.
+
+### The event stream contract
 
 The engine trusts the adapter on these points. `nqbook check-feed` verifies the ones it can:
 
@@ -250,15 +259,11 @@ Example: the price 100.5 is stored as 1005000000000.
 #include <nq/adapter_testing.hpp>
 
 nq::ParamsBuilder pb;
-pb.Set("path", "fixture.mbo");
-nq::testing::AdapterSandbox<Replay> sb(pb.Build());
-auto events = sb.Drain();            // pulls until End or Error
+pb.Set("count", "5");
+nq::testing::AdapterSandbox<Ticks> sb(pb.Build());
+auto events = sb.Drain();            // pulls until End or Error; 5 events here
 sb.LastStatus();                     // nq::Next::End
 ```
-
-### The .mbo file
-
-`nq/mbo_file.hpp` defines the replay file format with a reader and a writer. `Writer` takes the instrument table and then writes one `nq_mbo` per call. `Reader` returns the instrument table and yields one event per `Next`. The file describes itself. It needs no companion metadata file.
 
 ## Headers
 
@@ -270,7 +275,6 @@ sb.LastStatus();                     // nq::Next::End
 | `nq/feature.hpp` | every C++ type a feature needs, plus `NQ_PLUGIN` |
 | `nq/adapter.hpp` | every C++ type an adapter needs, plus `NQ_ADAPTER` |
 | `nq/feature_testing.hpp` `nq/adapter_testing.hpp` | test helpers that need no engine |
-| `nq/mbo_file.hpp` | the replay file format |
 | `nq/feature_host.hpp` `nq/adapter_host.hpp` | the engine-side loaders. Plugins never include them |
 
 Which plugins a header change invalidates:
