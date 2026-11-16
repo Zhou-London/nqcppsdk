@@ -6,15 +6,26 @@ This manual is for people and automated harnesses that write NQBook plugins. It 
 
 | Term | Meaning |
 |---|---|
+| feed | the kind of record an adapter produces: MBO or OHLCV. One run of NQBook reads one feed |
 | event | one MBO record: an add, cancel, modify, trade, or clear for one order |
-| instrument | one tradable thing with its own order book, identified by a `uint32` id the adapter assigns |
+| OHLCV record | one bar of one instrument: open, high, low, close, and volume over one period |
+| instrument | one tradable thing, identified by a `uint32` id the adapter assigns. On an MBO feed it has its own order book |
 | resting order | an order that is already in the book |
 | level | all resting orders at one price on one side: total quantity, order count, and the FIFO queue |
-| feature | a plugin class that computes numbers from a book. NQBook creates one instance per instrument |
+| feature | a plugin class that computes numbers from the feed. NQBook creates one instance per instrument |
 | column | one number a feature produces. NQBook names it `plugin.column`, where `plugin` is the `.so` file name without the extension |
 | snapshot column | a column that holds the value at the sampling instant |
 | cumulative column | a column that holds a running total that never decreases; NQBook writes the increase since the previous row |
-| adapter | a plugin class that produces the event stream |
+| adapter | a plugin class that produces the feed |
+
+### Feeds
+
+| Feed | Record | Feature macro | Adapter macro | A feature reads |
+|---|---|---|---|---|
+| MBO | `nq::Mbo`: one order event | `NQ_PLUGIN` | `NQ_ADAPTER` | the event and the order book |
+| OHLCV | `nq::Ohlcv`: one bar | `NQ_OHLCV_PLUGIN` | `NQ_OHLCV_ADAPTER` | the record |
+
+An adapter produces one feed. A feature plugin reads one feed. NQBook refuses to run a feature plugin with an adapter of the other feed. Sections 3 and 4 describe the MBO feed first, then the OHLCV feed.
 
 ## 2. Project setup
 
@@ -28,7 +39,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(nqcppsdk
     GIT_REPOSITORY https://github.com/Zhou-London/nqcppsdk.git
-    GIT_TAG v0.1.2
+    GIT_TAG v0.2.0
     GIT_SHALLOW ON
 )
 FetchContent_MakeAvailable(nqcppsdk)
@@ -151,6 +162,65 @@ A cumulative column lets one feature serve several sampling rates. A 1-second sa
 
 Parameters come from the plugin's `.params` file and from the `nqbook` command line.
 
+### An OHLCV feature
+
+```cpp
+#include <cmath>
+
+#include <nq/feature.hpp>
+
+struct Candle : nq::FeatureBase {
+    static constexpr auto kColumns = nq::MakeColumns({
+        {"close", "price", "close of the last record"},
+        {"volume", "qty", "traded volume", nq::kCumulative},
+    });
+
+    explicit Candle(const nq::Params& p) : scale_(double(p.PriceScale())) {}
+
+    void OnOhlcv(const nq::Ohlcv& ohlcv) noexcept {
+        close_ = double(ohlcv.close) / scale_;
+        volume_ += ohlcv.volume;
+    }
+
+    void OnControl(const nq::Control& c) noexcept {
+        if (c.type == nq::ControlType::Reset) volume_ = 0.0;
+    }
+
+    void Read(std::span<double> out) const noexcept {
+        out[0] = close_;
+        out[1] = volume_;
+    }
+
+private:
+    double scale_;
+    double close_ = NAN;
+    double volume_ = 0.0;
+};
+
+NQ_OHLCV_PLUGIN(Candle)
+```
+
+An OHLCV feature differs from an MBO feature in these members:
+
+| Member | Role |
+|---|---|
+| `OnOhlcv(const Ohlcv&) noexcept` | called once per record. Optional. `FeatureBase` provides an empty one |
+| `Read(std::span<double>) const noexcept` | writes `kColumns.size()` values at sampling time. It takes no `BookView`: an OHLCV feed has no order book |
+| `kRequires` | unused |
+
+`NQ_OHLCV_PLUGIN(A, B, C)` packs OHLCV features into one plugin. A plugin holds features of one feed. A plugin that mixes both feeds fails to compile.
+
+Column kinds, the three rules, and `Params` are the same for both feeds.
+
+`nq::Ohlcv`:
+
+| Field | Meaning |
+|---|---|
+| `ts` | start of the period, UTC nanoseconds |
+| `open` `high` `low` `close` | fixed-point prices. `price / PriceScale()` is the floating-point price |
+| `volume` | the quantity traded in the period, a `double` in whole units |
+| `instrument` | the instrument id |
+
 ### Testing a feature
 
 `nq/feature_testing.hpp` needs no engine:
@@ -168,6 +238,17 @@ auto v = sb.Read();   // v[0] == 0.75, v[1] == 1
 ```
 
 `Feed` hands the event to the feature. It leaves the mock book unchanged.
+
+An OHLCV feature runs in the same `Sandbox`:
+
+```cpp
+nq::ParamsBuilder pb;
+pb.PriceScale(100);
+
+nq::testing::Sandbox<Candle> sb(pb.Build());
+sb.Feed(nq::testing::MakeOhlcv(60, 10000, 10250, 9900, 10100, 1.5));   // ts, open, high, low, close, volume
+auto v = sb.Read();   // v[0] == 101.0, v[1] == 1.5
+```
 
 ## 4. Writing an adapter
 
@@ -255,6 +336,65 @@ stored quantity = round(quantity * NQ_QTY_SCALE)     NQ_QTY_SCALE   = 100000000
 
 Example: the price 100.5 is stored as 1005000000000.
 
+### An OHLCV adapter
+
+This adapter produces `count` one-minute records for one instrument:
+
+```cpp
+#include <cstdint>
+
+#include <nq/adapter.hpp>
+
+class Bars : public nq::AdapterBase {
+public:
+    static constexpr const char* kName = "bars";
+
+    explicit Bars(const nq::Params& p) : count_(p.RequireInt("count")), scale_(p.PriceScale()) {}
+
+    nq::Next Next(nq::Ohlcv& out) {
+        if (next_ >= count_) return nq::Next::End;
+        const std::int64_t i = next_++;
+        out.ts = i * 60'000'000'000;
+        out.open = (100 + i) * scale_;
+        out.high = out.open + 2 * scale_;
+        out.low = out.open - scale_;
+        out.close = out.open + scale_;
+        out.volume = 12.5;
+        out.instrument = 1;
+        return nq::Next::Event;
+    }
+
+    const nq::Instrument* FindInstrument(std::uint32_t id) const noexcept {
+        return id == 1 ? &instrument_ : nullptr;
+    }
+
+private:
+    std::int64_t count_;
+    std::int64_t scale_;
+    std::int64_t next_ = 0;
+    nq::Instrument instrument_{1, "DEMO", 10, 1};
+};
+
+NQ_OHLCV_ADAPTER(Bars)
+```
+
+An OHLCV adapter has the members of an MBO adapter, with these differences:
+
+| Member | Role |
+|---|---|
+| `Next(nq::Ohlcv&)` | produces one OHLCV record. The return values are the same |
+| `kProvides` | unused |
+
+An adapter class has one `Next`. A class with both overloads fails to compile.
+
+### The OHLCV feed contract
+
+- `ts` is the start of the record's period. It never decreases.
+- `instrument` follows the MBO rule: `FindInstrument(id)` must answer before the first record with that id.
+- `open`, `high`, `low`, and `close` are fixed-point prices scaled by `NQ_PRICE_SCALE`.
+- `volume` is a `double` in whole units. It has no scale factor.
+- NQBook builds no order book from an OHLCV feed. Each record goes to the features of its instrument.
+
 ### Testing an adapter
 
 ```cpp
@@ -267,12 +407,14 @@ auto events = sb.Drain();            // pulls until End or Error; 5 events here
 sb.LastStatus();                     // nq::Next::End
 ```
 
+`AdapterSandbox` runs adapters of both feeds. `Drain` returns `nq::Mbo` events or `nq::Ohlcv` records.
+
 ## 5. Headers
 
 | Header | Contents |
 |---|---|
-| `nq/feature.hpp` | every C++ type a feature needs, plus `NQ_PLUGIN` |
-| `nq/adapter.hpp` | every C++ type an adapter needs, plus `NQ_ADAPTER` |
+| `nq/feature.hpp` | every C++ type a feature needs, plus `NQ_PLUGIN` and `NQ_OHLCV_PLUGIN` |
+| `nq/adapter.hpp` | every C++ type an adapter needs, plus `NQ_ADAPTER` and `NQ_OHLCV_ADAPTER` |
 | `nq/feature_testing.hpp` `nq/adapter_testing.hpp` | test helpers that need no engine |
 | `nq/abi.h` `nq/feature_abi.h` `nq/adapter_abi.h` | the C ABI. Include these directly only when writing a plugin in C |
 | `nq/feature_host.hpp` `nq/adapter_host.hpp` | the engine-side loaders. Plugins never include them |
