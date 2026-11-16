@@ -10,11 +10,11 @@
 
 # NQCPPSDK
 
-NQCPPSDK is the SDK for writing [NQBook](https://github.com/Zhou-London/nqbook) plugins: feature plugins that compute numbers from market data, and adapter plugins that produce the data as an MBO or OHLCV feed.
+NQCPPSDK is the SDK for writing [NQ HPC](https://github.com/Zhou-London/nqbook) plugins: feature plugins that compute numbers from market data, and adapter plugins that produce the data as an MBO or OHLCV feed.
 
 - **Header-only, no dependencies.** A plugin includes headers under `nq/` and links nothing.
 - **A C ABI between engine and plugin.** The C++ layer is a thin wrapper, so a plugin can also be written in C or any language that can export C symbols.
-- **Hash-checked.** The content hash of the ABI headers is compiled into every plugin. NQBook refuses a plugin built against a different SDK.
+- **Hash-checked.** The content hash of the ABI headers is compiled into every plugin. NQ HPC refuses a plugin built against a different SDK.
 - **Testable without the engine.** `feature_testing.hpp` and `adapter_testing.hpp` run a plugin in-process with a mock book.
 
 ## Thirty seconds
@@ -52,4 +52,4 @@ NQ_PLUGIN(Spread)
 |---|---|---|
 | [docs/manual.md](docs/manual.md) | plugin authors | project setup, writing and testing a feature, writing and testing an adapter, the feed contracts, the API reference |
 | [docs/development.md](docs/development.md) | people changing the SDK | header layout, the ABI and its hash, tests, release loop |
-| [NQBook manual](https://github.com/Zhou-London/nqbook/blob/main/docs/manual.md) | users of the engine | how plugins are loaded, configured, and run |
+| [NQ HPC README](https://github.com/Zhou-London/nqbook#readme) | users of the engine | building and running the engine, its architecture |

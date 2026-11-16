@@ -58,7 +58,7 @@ The plugin macros write the macro's value into the schema the plugin exports. Th
 
 Rules for the C headers:
 
-- They must compile as C11 with `-Wall -Wextra -Wpedantic`. `tests/` in NQBook keeps a plain C plugin that proves it.
+- They must compile as C11 with `-Wall -Wextra -Wpedantic`. `tests/` in NQ HPC keeps a plain C plugin that proves it.
 - A field is never renamed, reordered, or resized; add fields at the end. Any such change still changes the hash, so every plugin rebuilds, but the C++ layer keeps compiling.
 - Entry points are `extern "C"` functions named by the `NQ_SYM_*` macros. The host resolves them by those names.
 - `NQ_SDK_VERSION` is the human-readable version. The hash is the machine-checked one; both move on a release.
@@ -80,7 +80,7 @@ The tests are built when the SDK is the top-level project (`NQCPPSDK_BUILD_TESTS
 1. Commit the change.
 2. Bump `NQ_SDK_VERSION` in `nq/abi.h` and `VERSION` in `CMakeLists.txt`. Update the version in the README banner and the `GIT_TAG` in the README and the manual.
 3. `git tag -a vX.Y.Z -m "nqcppsdk vX.Y.Z"`, then `git push origin main` and `git push origin vX.Y.Z`.
-4. In NQBook, set `GIT_TAG vX.Y.Z` in its `CMakeLists.txt`, delete `build/` and `shared/nqcppsdk`, reconfigure, and run its tests.
+4. In NQ HPC, set `GIT_TAG vX.Y.Z` in its `CMakeLists.txt`, delete `build/` and `shared/nqcppsdk`, reconfigure, and run its tests.
 
 A change to any ABI header is a release: plugins built before it stop loading.
 
