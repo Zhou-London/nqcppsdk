@@ -6,21 +6,23 @@ This document is for people who change the SDK itself. Plugin authors read [manu
 
 ```
 nq/abi.h                 C: types both plugin kinds share: nq_mbo, nq_ohlcv, nq_params, the side, action, and feed enums, the scale factors
-nq/feature_abi.h         C: the feature plugin ABI: nq_event, nq_level, nq_book_view, nq_column, nq_schema, the entry points
+nq/feature_abi.h         C: the feature plugin ABI: nq_event, nq_level, nq_book_view, nq_column, nq_schema, nq_cross_panel, nq_cross_schema, the entry points
 nq/adapter_abi.h         C: the adapter plugin ABI: nq_instrument, nq_adapter_schema, the entry points
 nq/types.hpp             C++: Side, Action, and Feed enums over the C values, Ohlcv
 nq/instrument.hpp        C++: Instrument
 nq/params.hpp            C++: Params over nq_params, ParamsBuilder
 nq/book_view.hpp         C++: BookView over nq_book_view
-nq/feature.hpp           C++: Event, Control, FeatureType and OhlcvFeatureType concepts, Bundle, NQ_PLUGIN, NQ_OHLCV_PLUGIN
+nq/feature.hpp           C++: Event, Control, CrossRow, FeatureType and OhlcvFeatureType concepts, Bundle, NQ_PLUGIN, NQ_OHLCV_PLUGIN
+nq/cross.hpp             C++: CrossView over nq_cross_panel, the CrossType concept, NQ_CROSS
+nq/cross_stats.hpp       C++: RunningMoments, RunningRank
 nq/adapter.hpp           C++: Mbo, Next, AdapterType and OhlcvAdapterType concepts, NQ_ADAPTER, NQ_OHLCV_ADAPTER
 nq/feature_testing.hpp   C++: MockBook, Sandbox
 nq/adapter_testing.hpp   C++: AdapterSandbox
 nq/plugin_error.hpp      C++: the exception types the host layer throws
-nq/feature_host.hpp      C++: Plugin and PluginInstance, the engine side of a feature plugin
+nq/feature_host.hpp      C++: Plugin, PluginInstance, and CrossInstance, the engine side of a feature plugin
 nq/adapter_host.hpp      C++: AdapterPlugin and AdapterInstance, the engine side of an adapter
 cmake/NqPlugin.cmake     nq_add_plugin()
-tests/                   feature_test and adapter_test, each with one test plugin per feed built as a .so
+tests/                   feature_test and adapter_test, each with one test plugin per feed built as a .so; cross_test with one cross plugin
 CMakeLists.txt           the nqcppsdk INTERFACE target, the ABI hashes, the tests option
 ```
 
@@ -44,6 +46,24 @@ The other entry points are the same for both feeds. The host reads `feed` after 
 `Bundle` derives its feed from its feature classes. All `FeatureType` gives MBO, all `OhlcvFeatureType` gives OHLCV, and a mix fails to compile. `NQ_PLUGIN` and `NQ_ADAPTER` accept MBO classes only. `NQ_OHLCV_PLUGIN` and `NQ_OHLCV_ADAPTER` accept OHLCV classes only.
 
 `provides` and `requirement` describe order book depth. An OHLCV plugin sets them to `NQ_REQUIRES_NONE`.
+
+## Crosses
+
+A cross is an optional part of a feature plugin. `NQ_CROSS` exports five more entry points from the same `.so`:
+
+| Entry point | Receives | Job |
+|---|---|---|
+| `nq_cross_describe` | nothing | returns the `nq_cross_schema`: input column names and output columns |
+| `nq_cross_init` | the plugin's `nq_params` | creates the one cross state of the run |
+| `nq_cross_destroy` | the cross state | frees it |
+| `nq_cross_apply` | the cross state and an `nq_cross_panel` | computes one boundary |
+| `nq_cross_bind` | a per-instrument state, a pointer, and a stride | hands a feature instance its row of the output panel |
+
+The host looks for `nq_cross_describe` after the feed entry points. A plugin without it has no cross. A plugin with it must export `nq_cross_init`, `nq_cross_destroy`, and `nq_cross_apply`; `nq_cross_bind` is optional.
+
+`nq_cross_panel` is column-major. Column `c` of `in` starts at `in + c * stride`, and the same holds for `out`. `valid` is a bitmap with one bit per row. `changed` lists `nchanged` row indices. The pointer `nq_cross_bind` receives addresses output column 0 of one row; column `c` is at `row[c * stride]`. The host calls `nq_cross_bind` again when the panel moves.
+
+`Bundle::BindCross` forwards to every feature class that has a `BindCross` member.
 
 ## The ABI hash
 
@@ -71,7 +91,7 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-The tests are built when the SDK is the top-level project (`NQCPPSDK_BUILD_TESTS`, default `ON` there and `OFF` when consumed through `add_subdirectory` or `FetchContent`). `feature_test` runs a feature through `Sandbox` in-process and again through a `.so` loaded with `host::Plugin`. `adapter_test` does the same for an adapter with `AdapterSandbox` and `host::AdapterPlugin`, and checks that each loader refuses the other kind of plugin. Both tests cover both feeds.
+The tests are built when the SDK is the top-level project (`NQCPPSDK_BUILD_TESTS`, default `ON` there and `OFF` when consumed through `add_subdirectory` or `FetchContent`). `feature_test` runs a feature through `Sandbox` in-process and again through a `.so` loaded with `host::Plugin`. `adapter_test` does the same for an adapter with `AdapterSandbox` and `host::AdapterPlugin`, and checks that each loader refuses the other kind of plugin. Both tests cover both feeds. `cross_test` checks `RunningMoments` and `RunningRank` against a full recomputation, then runs a cross through a `.so` loaded with `host::Plugin`.
 
 `tests/check.hpp` holds the `CHECK` macro every test uses.
 
@@ -90,4 +110,4 @@ A change to any ABI header is a release: plugins built before it stop loading.
 - No comments in code. This file and the manual carry the explanations.
 - C headers: `nq_` prefixed snake_case types and `NQ_` prefixed macros and enum values. C++ headers: namespace `nq`, PascalCase types and methods.
 - Every C++ wrapper is a thin view over one C struct and never owns engine state.
-- Plugin-facing concepts (`FeatureType`, `OhlcvFeatureType`, `AdapterType`, `OhlcvAdapterType`) are checked by the plugin macros with a `static_assert`, so a wrong member signature fails in the plugin's own build.
+- Plugin-facing concepts (`FeatureType`, `OhlcvFeatureType`, `CrossType`, `AdapterType`, `OhlcvAdapterType`) are checked by the plugin macros with a `static_assert`, so a wrong member signature fails in the plugin's own build.

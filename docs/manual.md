@@ -16,6 +16,8 @@ This manual is for people and automated harnesses that write NQ HPC plugins. It 
 | column | one number a feature produces. NQ HPC names it `plugin.column`, where `plugin` is the `.so` file name without the extension |
 | snapshot column | a column that holds the value at the sampling instant |
 | cumulative column | a column that holds a running total; NQ HPC writes the change since the previous row |
+| cross | a class in a feature plugin that computes numbers across all instruments at one instant. NQ HPC creates one instance per run |
+| boundary | an instant on the time grid of a cross. NQ HPC runs the cross once per boundary |
 | adapter | a plugin class that produces the feed |
 
 ### Feeds
@@ -39,7 +41,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(nqcppsdk
     GIT_REPOSITORY https://github.com/Zhou-London/nqcppsdk.git
-    GIT_TAG v0.2.0
+    GIT_TAG v0.3.0
     GIT_SHALLOW ON
 )
 FetchContent_MakeAvailable(nqcppsdk)
@@ -221,6 +223,97 @@ Column kinds, the three rules, and `Params` are the same for both feeds.
 | `open` `high` `low` `close` | fixed-point prices. `price / PriceScale()` is the floating-point price |
 | `volume` | the quantity traded in the period, a `double` in whole units |
 | `instrument` | the instrument id |
+
+### A cross
+
+A cross reads one or more columns of its own plugin for every instrument and writes new columns. A feature of the same plugin can read those columns back.
+
+```cpp
+#include <nq/cross.hpp>
+#include <nq/cross_stats.hpp>
+
+struct MidCross {
+    static constexpr auto kInputs = nq::MakeInputs({"mid"});
+    static constexpr auto kColumns = nq::MakeColumns({
+        {"mean", "price", "cross-sectional mean of mid"},
+        {"rank", "", "cross-sectional rank of mid in [0, 1]"},
+    });
+
+    explicit MidCross(const nq::Params&) {}
+
+    void Apply(const nq::CrossView& view) noexcept {
+        const auto mid = view.In(0);
+        moments_.Update(mid, view.Changed());
+        rank_.Update(mid, view.Changed());
+
+        const auto mean = view.Out(0);
+        for (std::size_t r = 0; r < mid.size(); ++r) mean[r] = moments_.Mean();
+        rank_.Write(view.Out(1));
+    }
+
+private:
+    nq::RunningMoments moments_;
+    nq::RunningRank rank_;
+};
+
+NQ_PLUGIN(Mid)
+NQ_CROSS(MidCross)
+```
+
+| Member | Role |
+|---|---|
+| `kInputs` | names of snapshot columns of this plugin, without the plugin prefix. `nq::MakeInputs` builds the array |
+| `kColumns` | the output columns. NQ HPC names them `cross.column`, where `cross` is the name given on the command line |
+| constructor `(const nq::Params&)` | receives the plugin's parameters. `Symbol()` is empty |
+| `Apply(const CrossView&) noexcept` | called once per boundary |
+
+`NQ_CROSS(C)` goes after `NQ_PLUGIN` or `NQ_OHLCV_PLUGIN` in the same file. A plugin holds at most one cross.
+
+`nqhpc run --cross NAME=PLUGIN:EVERY` runs the cross of `PLUGIN` every `EVERY`, for example `--cross x=my_feature:1s`. NQ HPC writes one table named `NAME`. Each row holds one instrument at one boundary: the input columns, then the output columns. The table holds the instruments that had a record since the previous boundary. With `--fill-gaps` the table holds every valid instrument at every boundary.
+
+`CrossView` is the panel at one boundary. Each instrument owns one row for the whole run.
+
+| Method | Returns |
+|---|---|
+| `Ts()` | the boundary, UTC nanoseconds |
+| `RowCount()` | the number of rows |
+| `In(c)` | input column `c` as `std::span<const double>`, one value per row |
+| `Out(c)` | output column `c` as `std::span<double>`. NQ HPC keeps the values between boundaries |
+| `Valid(row)` | true once the instrument of `row` has had a boundary |
+| `Changed()` | the rows that had a record since the previous boundary |
+
+Rules for `Apply`:
+
+- A record with `ts` equal to the boundary belongs to the next boundary.
+- A row outside `Changed()` keeps its input values from its last boundary.
+- An input is NaN until the row is valid, and whenever the feature wrote NaN. Skip NaN inputs.
+- Cost should follow `Changed().size()`, not `RowCount()`. `nq/cross_stats.hpp` holds two helpers that do so.
+
+| Helper | Keeps | Cost per `Update` |
+|---|---|---|
+| `nq::RunningMoments` | count, mean, population variance and standard deviation of the non-NaN values | O(changed) |
+| `nq::RunningRank` | the rows sorted by value, ties by row. `Write(out)` writes ranks in [0, 1] and NaN for NaN inputs | O(rows + changed log changed) |
+
+A feature reads the cross output through `BindCross`:
+
+```cpp
+struct Relative : nq::FeatureBase {
+    static constexpr auto kColumns = nq::MakeColumns({{"market_mid", "price", "mean of mid across instruments"}});
+
+    explicit Relative(const nq::Params&) {}
+
+    void BindCross(nq::CrossRow row) noexcept { cross_ = row; }
+
+    void Read(std::span<double> out, const nq::BookView&) const noexcept {
+        out[0] = cross_ ? cross_[0] : std::numeric_limits<double>::quiet_NaN();
+    }
+
+private:
+    nq::CrossRow cross_;
+};
+```
+
+`cross_[c]` is output column `c` of this instrument at the last boundary. The value is NaN before the first boundary. `cross_` is false when the run has no `--cross` for the plugin. NQ HPC may call `BindCross` again at any time, so store the `CrossRow` and read through it. A feature may read `cross_` in `OnEvent`, `OnOhlcv`, and `Read`. A sampler row at a boundary sees the cross output of that boundary.
 
 ### Testing a feature
 
@@ -415,6 +508,8 @@ sb.LastStatus();                     // nq::Next::End
 | Header | Contents |
 |---|---|
 | `nq/feature.hpp` | every C++ type a feature needs, plus `NQ_PLUGIN` and `NQ_OHLCV_PLUGIN` |
+| `nq/cross.hpp` | `CrossView`, `MakeInputs`, and `NQ_CROSS`. Includes `nq/feature.hpp` |
+| `nq/cross_stats.hpp` | `RunningMoments` and `RunningRank` |
 | `nq/adapter.hpp` | every C++ type an adapter needs, plus `NQ_ADAPTER` and `NQ_OHLCV_ADAPTER` |
 | `nq/feature_testing.hpp` `nq/adapter_testing.hpp` | test helpers that need no engine |
 | `nq/abi.h` `nq/feature_abi.h` `nq/adapter_abi.h` | the C ABI. Include these directly only when writing a plugin in C |
@@ -435,7 +530,7 @@ Exit codes of `nqhpc`:
 | 2 | a plugin or adapter `.so` failed to load |
 | 3 | a plugin or adapter was built with another ABI |
 | 4 | a plugin or adapter constructor threw |
-| 5 | a sampler spec is invalid |
+| 5 | a sampler or cross spec is invalid |
 | 6 | a `.params` file or a `KEY=VALUE` parameter is invalid |
 | 7 | the adapter stream ended with `Next::Error` |
 | 8 | the output files could not be written |
