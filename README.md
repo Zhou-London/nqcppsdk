@@ -1,7 +1,7 @@
-<p align="center"><img src="https://capsule-render.vercel.app/api?type=blur&height=240&color=gradient&text=NQCPPSDK&fontSize=64&fontAlign=50&fontAlignY=45&desc=v0.3.0&descSize=22&descAlign=50&descAlignY=65" /></p>
+<p align="center"><img src="https://capsule-render.vercel.app/api?type=blur&height=240&color=gradient&text=NQCPPSDK&fontSize=64&fontAlign=50&fontAlignY=45&desc=v0.4.0&descSize=22&descAlign=50&descAlignY=65" /></p>
 
 <p align="center">
-  <img alt="Version 0.3.0" src="https://img.shields.io/badge/version-0.3.0-blue" />
+  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-blue" />
   <img alt="C++23" src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" />
   <img alt="CMake 3.28+" src="https://img.shields.io/badge/CMake-3.28%2B-064F8C?logo=cmake&logoColor=white" />
   <img alt="Header-only" src="https://img.shields.io/badge/header--only-INTERFACE-4c1" />
@@ -23,7 +23,7 @@ NQCPPSDK is the SDK for writing [NQ HPC](https://github.com/Zhou-London/nqbook) 
 include(FetchContent)
 FetchContent_Declare(nqcppsdk
     GIT_REPOSITORY https://github.com/Zhou-London/nqcppsdk.git
-    GIT_TAG v0.3.0
+    GIT_TAG v0.4.0
     GIT_SHALLOW ON
 )
 FetchContent_MakeAvailable(nqcppsdk)

@@ -65,6 +65,19 @@ The host looks for `nq_cross_describe` after the feed entry points. A plugin wit
 
 `Bundle::BindCross` forwards to every feature class that has a `BindCross` member.
 
+## Warm-up
+
+Warm-up carries OHLCV bars from the adapter to the features before the feed starts. Two optional entry points carry them:
+
+| Entry point | Exported by | Receives | Job |
+|---|---|---|---|
+| `nq_adapter_warmup` | an adapter of either feed | the adapter state and an `nq_ohlcv` to fill | produces one warm-up bar. Returns an `nq_next` value |
+| `nq_on_warmup` | a feature plugin of either feed | a per-instrument state and an `nq_ohlcv` | hands one warm-up bar to the features |
+
+The host looks both up with `dlsym`. `AdapterInstance::Warmup` returns `NQ_NEXT_END` for an adapter without the symbol. `PluginInstance::OnWarmup` does nothing for a plugin without it.
+
+The plugin macros always export both. `AdapterBase::Warmup` returns `End` and `FeatureBase::OnWarmup` is empty, so a class that defines neither sends and reads no warm-up bars. `Bundle::OnWarmup` forwards to every feature class.
+
 ## The ABI hash
 
 `CMakeLists.txt` hashes the ABI headers at configure time and defines two macros on the `nqcppsdk` target:
@@ -91,7 +104,7 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-The tests are built when the SDK is the top-level project (`NQCPPSDK_BUILD_TESTS`, default `ON` there and `OFF` when consumed through `add_subdirectory` or `FetchContent`). `feature_test` runs a feature through `Sandbox` in-process and again through a `.so` loaded with `host::Plugin`. `adapter_test` does the same for an adapter with `AdapterSandbox` and `host::AdapterPlugin`, and checks that each loader refuses the other kind of plugin. Both tests cover both feeds. `cross_test` checks `RunningMoments` and `RunningRank` against a full recomputation, then runs a cross through a `.so` loaded with `host::Plugin`.
+The tests are built when the SDK is the top-level project (`NQCPPSDK_BUILD_TESTS`, default `ON` there and `OFF` when consumed through `add_subdirectory` or `FetchContent`). `feature_test` runs a feature through `Sandbox` in-process and again through a `.so` loaded with `host::Plugin`. `adapter_test` does the same for an adapter with `AdapterSandbox` and `host::AdapterPlugin`, and checks that each loader refuses the other kind of plugin. Both tests cover both feeds. Both tests run warm-up bars through the sandbox and through the `.so`. `cross_test` checks `RunningMoments` and `RunningRank` against a full recomputation, then runs a cross through a `.so` loaded with `host::Plugin`.
 
 `tests/check.hpp` holds the `CHECK` macro every test uses.
 

@@ -9,6 +9,7 @@ This manual is for people and automated harnesses that write NQ HPC plugins. It 
 | feed | the kind of record an adapter produces: MBO or OHLCV. One run of NQ HPC reads one feed |
 | event | one MBO record: an add, cancel, modify, trade, or clear for one order |
 | OHLCV record | one bar of one instrument: open, high, low, close, and volume over one period |
+| warm-up bar | an OHLCV record the adapter hands to the features before the feed starts. It fills feature state and writes no row |
 | instrument | one tradable thing, identified by a `uint32` id the adapter assigns. On an MBO feed it has its own order book |
 | resting order | an order that is already in the book |
 | level | all resting orders at one price on one side: total quantity, order count, and the FIFO queue |
@@ -41,7 +42,7 @@ set(CMAKE_CXX_STANDARD 23)
 include(FetchContent)
 FetchContent_Declare(nqcppsdk
     GIT_REPOSITORY https://github.com/Zhou-London/nqcppsdk.git
-    GIT_TAG v0.3.0
+    GIT_TAG v0.4.0
     GIT_SHALLOW ON
 )
 FetchContent_MakeAvailable(nqcppsdk)
@@ -108,6 +109,7 @@ A feature is a class with these members:
 | constructor `(const nq::Params&)` | receives the parameters. Throw to reject them. The plugin then fails to load |
 | `OnEvent(const Event&, const BookView&) noexcept` | called once per event. Optional. `FeatureBase` provides an empty one |
 | `OnControl(const Control&) noexcept` | receives control events. `Reset` means the book was cleared. Optional |
+| `OnWarmup(const Ohlcv&) noexcept` | called once per warm-up bar, before the first event. Optional. See [Warm-up](#warm-up) |
 | `Read(std::span<double>, const BookView&) const noexcept` | writes `kColumns.size()` values at sampling time |
 
 `NQ_PLUGIN(A, B, C)` packs one or more feature classes into one plugin. The columns of `A` come first, then `B`, then `C`.
@@ -224,6 +226,51 @@ Column kinds, the three rules, and `Params` are the same for both feeds.
 | `volume` | the quantity traded in the period, a `double` in whole units |
 | `instrument` | the instrument id |
 
+### Warm-up
+
+A feature that needs history defines `OnWarmup`. This MBO feature holds the mean close of the last 20 daily bars:
+
+```cpp
+#include <array>
+#include <cmath>
+
+#include <nq/feature.hpp>
+
+struct DayMean : nq::FeatureBase {
+    static constexpr std::size_t kDays = 20;
+    static constexpr auto kColumns = nq::MakeColumns({
+        {"mean20", "price", "mean close of the last 20 daily bars"},
+    });
+
+    explicit DayMean(const nq::Params& p) : scale_(double(p.PriceScale())) {}
+
+    void OnWarmup(const nq::Ohlcv& day) noexcept {
+        closes_[days_++ % kDays] = double(day.close) / scale_;
+    }
+
+    void Read(std::span<double> out, const nq::BookView&) const noexcept {
+        double sum = 0.0;
+        for (const double close : closes_) sum += close;
+        out[0] = days_ >= kDays ? sum / kDays : NAN;
+    }
+
+private:
+    double scale_;
+    std::array<double, kDays> closes_{};
+    std::size_t days_ = 0;
+};
+
+NQ_PLUGIN(DayMean)
+```
+
+NQ HPC calls `OnWarmup` once per warm-up bar of the instrument. Every call comes before the first record of the feed. A feature of either feed may define `OnWarmup`. A feature without it ignores the warm-up bars.
+
+- The adapter chooses the warm-up bars: which instruments, how many bars, and which period. The feature must know the period the adapter sends.
+- Warm-up writes no rows. A cumulative column counts from its value at the end of warm-up, so the first row holds only the change since then.
+- Write NaN while the feature has too few bars. A run may send fewer bars than the feature needs, or none.
+- Keep the warm-up state on `OnControl(Reset)`. NQ HPC sends warm-up bars once, at the start of the run.
+- Warm-up happens once. A feature that runs across days adds each finished day to its history itself.
+
 ### A cross
 
 A cross reads one or more columns of its own plugin for every instrument and writes new columns. A feature of the same plugin can read those columns back.
@@ -331,7 +378,7 @@ sb.Feed(nq::testing::Add(1, 1, nq::Side::Bid, 10050, 7));        // ts, id, side
 auto v = sb.Read();   // v[0] == 0.75, v[1] == 1
 ```
 
-`Feed` hands the event to the feature. It leaves the mock book unchanged.
+`Feed` hands the event to the feature. It leaves the mock book unchanged. `sb.Warmup(bar)` hands a warm-up bar to `OnWarmup`.
 
 An OHLCV feature runs in the same `Sandbox`:
 
@@ -393,6 +440,7 @@ Build it with the same `nq_add_plugin` as a feature.
 | `kProvides` | optional. The fidelity of the stream: `Provides::L1`, `MBP`, or `MBO`. Default `MBO` |
 | constructor `(const nq::Params&)` | opens the file or the connection. Throw to report failure |
 | `Next(nq::Mbo&)` | produces one event. See the table below |
+| `Warmup(nq::Ohlcv&)` | optional. Produces one warm-up bar. See [Warm-up bars](#warm-up-bars) |
 | `FindInstrument(id) const noexcept` | returns the instrument's metadata, or `nullptr` for an unknown id |
 
 Return values of `Next`:
@@ -489,6 +537,26 @@ An adapter class has one `Next`. A class with both overloads fails to compile.
 - `volume` is a `double` in whole units. It has no scale factor.
 - NQ HPC builds no order book from an OHLCV feed. Each record goes to the features of its instrument.
 
+### Warm-up bars
+
+An adapter of either feed may define `Warmup`. This member sends the last `days_` daily bars the adapter loaded in its constructor:
+
+```cpp
+nq::Next Warmup(nq::Ohlcv& out) {
+    if (next_day_ == days_.size()) return nq::Next::End;
+    out = days_[next_day_++];
+    return nq::Next::Event;
+}
+```
+
+NQ HPC calls `Warmup` until it returns `End`, then starts calling `Next`. The return values mean the same as for `Next`. `AdapterBase` provides a `Warmup` that returns `End` at once.
+
+- A warm-up bar is an `nq::Ohlcv` with the fields of the OHLCV feed contract. The bars may have any period and come in any order.
+- `instrument` uses the ids of the feed. `FindInstrument(id)` must answer before the first warm-up bar with that id.
+- Send only bars from before the first record of the feed. NQ HPC does not check the timestamps.
+- NQ HPC ends all `Warmup` calls before the first `Next` call. `Warmup` and `Next` may run on different threads, never at the same time.
+- `Error` ends the run with exit code 7 before the feed starts.
+
 ### Testing an adapter
 
 ```cpp
@@ -501,7 +569,7 @@ auto events = sb.Drain();            // pulls until End or Error; 5 events here
 sb.LastStatus();                     // nq::Next::End
 ```
 
-`AdapterSandbox` runs adapters of both feeds. `Drain` returns `nq::Mbo` events or `nq::Ohlcv` records.
+`AdapterSandbox` runs adapters of both feeds. `Drain` returns `nq::Mbo` events or `nq::Ohlcv` records. `DrainWarmup` returns the warm-up bars.
 
 ## 5. Headers
 
